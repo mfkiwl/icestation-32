@@ -158,7 +158,6 @@ module vdp_vram_bus_arbiter_standard(
     reg [15:0] scroll_map_data_hold [0:3];
 
     wire [3:0] palette_selected = map_selected_word[15:12];
-    wire x_flip_selected = map_selected_word[9];
 
     // A delay is needed on the VRAM word select since the fetches are pipelined
 
@@ -218,7 +217,7 @@ module vdp_vram_bus_arbiter_standard(
 
         vram_sprite_read_data_valid = 0;
 
-        case (raster_x[2:0])
+        case (raster_x_offset[2:0])
             0: begin
                 // now: s0 map data
                 scroll_meta_load = `LAYER_SCROLL0_OHE;
@@ -236,7 +235,6 @@ module vdp_vram_bus_arbiter_standard(
                 vram_address_nx = vram_sprite_address;
 
                 // next next: s0 tile address
-                // (this could be packaged up in a seprate block considering it's the same pattern)
                 tile_address_layer_select = `LAYER_SCROLL0;
             end
             2: begin

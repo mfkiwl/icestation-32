@@ -28,19 +28,19 @@ void pad_read(uint16_t *p1_current, uint16_t *p2_current, uint16_t *p1_edge, uin
 
     const uint8_t button_count = 16;
 
-    // latch current pad inputs
+    // Latch the current state of pad inputs
     PAD_IO = PAD_LATCH;
     PAD_IO = 0;
 
     uint16_t p1_new = 0;
     uint16_t p2_new = 0;
     for (uint8_t i = 0; i < button_count; i++) {
-        // read p1/p2 inputs simulatenously
         p1_new >>= 1;
         p2_new >>= 1;
 
-        // read and clock in next bit
+        // Read current bit..
         uint8_t input_bits = PAD_IO;
+        // ..and clock in the next bit
         PAD_IO = PAD_CLK;
         PAD_IO = 0;
 
@@ -48,7 +48,7 @@ void pad_read(uint16_t *p1_current, uint16_t *p2_current, uint16_t *p1_edge, uin
         p2_new |= ((input_bits >> 1) & 1) << 15;
     }
 
-    // edge inputs
+    // Edge inputs
     if (p1_edge) {
         *p1_edge = (p1_new ^ *p1_current) & p1_new;
     }
@@ -56,10 +56,27 @@ void pad_read(uint16_t *p1_current, uint16_t *p2_current, uint16_t *p1_edge, uin
         *p2_edge = (p2_new ^ *p2_current) & p2_new;
     }
 
-    // level inputs
+    // Level inputs
     *p1_current = p1_new;
 
     if (p2_current) {
         *p2_current = p2_new;
     }
 }
+
+void pad_decode_input(uint16_t encoded_input, PadInputDecoded *decoded_input) {
+    assert(decoded_input);
+
+    for (uint32_t i = 0; i < 12; i++) {
+        decoded_input->indexed[i] = encoded_input & 1;
+        encoded_input >>= 1;
+    }
+}
+
+const PadInputDecoded PAD_INPUT_DECODED_NO_INPUT = {
+    .b = 0, .y = 0, .select = 0, .start = 0,
+    .up = 0, .down = 0, .left = 0, .right = 0,
+    .a = 0, .x = 0, .l = 0, .r = 0,
+    
+    .raw = 0
+};

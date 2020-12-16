@@ -19,6 +19,10 @@ public:
     bool clk_1x = false, clk_2x = false;
     bool button_user = false;
     bool button_1 = false, button_2 = false, button_3 = false;
+    bool button_y = false, button_up = false, button_down = false;
+    bool button_l = false, button_r = false;
+    bool button_x = false, button_a = false;
+    bool button_select = false, button_start = false;
 
     virtual void forward_cmd_args(int argc, const char * argv[]) = 0;
     
@@ -35,6 +39,8 @@ public:
 
     virtual bool hsync() const = 0;
     virtual bool vsync() const = 0;
+
+    virtual bool get_samples(int16_t *left, int16_t *right) = 0;
 
     virtual void final() = 0;
 

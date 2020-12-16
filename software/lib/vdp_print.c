@@ -8,7 +8,8 @@
 
 #include "tinyprintf.h"
 
-static uint8_t current_x, current_y, current_palette_mask;
+static uint8_t current_x, current_y;
+static uint16_t current_palette_mask;
 static VDPLayer current_layer;
 static uint16_t current_vram_base;
 
@@ -22,7 +23,7 @@ static void seek_update() {
     vdp_seek_vram(current_vram_base + address);
 }
 
-static void vdp_putc(void *p, char c) {
+static void vdp_putc(__attribute__((unused)) void *p, char c) {
     uint16_t map = c & 0xff;
     map |= current_palette_mask;
 
@@ -38,7 +39,7 @@ void vp_print_init() {
     init_printf(NULL, vdp_putc);
 }
 
-void vp_printf(uint8_t x, uint8_t y, uint8_t palette, VDPLayer layer, uint16_t vram_base, const char *fmt, ...) {
+void vp_printf_list(uint8_t x, uint8_t y, uint8_t palette, VDPLayer layer, uint16_t vram_base, const char *fmt, va_list args) {
     vdp_set_vram_increment(1);
 
     current_palette_mask = palette << SCROLL_MAP_PAL_SHIFT;
@@ -49,10 +50,34 @@ void vp_printf(uint8_t x, uint8_t y, uint8_t palette, VDPLayer layer, uint16_t v
 
     seek_update();
 
+    tfp_format(NULL, vdp_putc, fmt, args);
+}
+
+void vp_printf(uint8_t x, uint8_t y, uint8_t palette, VDPLayer layer, uint16_t vram_base, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    tfp_format(NULL, vdp_putc, fmt, args);
+    vp_printf_list(x, y, palette, layer, vram_base, fmt, args);
     va_end(args);
+}
+
+void vp_clear_row(uint8_t y, VDPLayer layer, uint16_t vram_base, bool half_width) {
+    vdp_set_vram_increment(1);
+
+    current_x = 0;
+    current_y = y;
+    current_palette_mask = 0;
+    current_layer = layer;
+    current_vram_base = vram_base;
+
+    seek_update();
+
+
+    uint32_t width = SCREEN_ACTIVE_WIDTH / 8;
+    width /= (half_width ? 2 : 1);
+
+    for (uint32_t i = 0; i < width; i++) {
+        vdp_putc(NULL, ' ');
+    }
 }
 
 uint8_t vp_center_string_x(const char *string) {

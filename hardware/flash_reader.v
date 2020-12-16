@@ -20,9 +20,10 @@ module flash_reader #(
     input reset,
 
     input valid,
-    output reg ready,
     input [23:0] address,
+    input size,
     output reg [31:0] data,
+    output reg ready,
 
     output reg flash_clk_en,
     output reg flash_csn,
@@ -32,7 +33,9 @@ module flash_reader #(
 );
     localparam DUMMY_CYCLES = ASSUME_QPI ? 0 : 4;
 
-    localparam CRM_BYTE = 8'h20;
+    // Winbond: byte[5:4] == 2'b10
+    // ISSI: byte[7:4] == 4'b1001
+    localparam [7:0] CRM_BYTE = 8'h20 | 8'h80;
 
     reg [4:0] state;
     
@@ -90,6 +93,8 @@ module flash_reader #(
         end
     end
 
+    wire [4:0] state_final = 5'h0b + (size ? 4 : 0) + DUMMY_CYCLES;
+
     always @(posedge clk) begin
         if (halted) begin
             flash_clk_en <= 0;
@@ -102,7 +107,7 @@ module flash_reader #(
 
             flash_clk_en <= 1;
 
-            if (state == (5'h0f + DUMMY_CYCLES)) begin
+            if (state == state_final) begin
                 ready <= 1;
             end
         end

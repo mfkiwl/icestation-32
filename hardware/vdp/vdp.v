@@ -16,7 +16,7 @@ module vdp #(
     input clk,
     input reset,
 
-    // host interface
+    // Host interface
 
     input [15:0] host_address,
     
@@ -38,7 +38,7 @@ module vdp #(
 
     output active_display,
 
-    // single-cycle strobes, NOT suitable for VGA
+    // Single-cycle strobes, NOT suitable for VGA
 
     output line_ended,
     output frame_ended,
@@ -46,15 +46,15 @@ module vdp #(
     
     // VRAM interface
 
-    output reg [13:0] vram_address_even,
-    output reg vram_we_even,
+    output [13:0] vram_address_even,
+    output vram_we_even,
     input [15:0] vram_read_data_even,
-    output reg [15:0] vram_write_data_even,
+    output [15:0] vram_write_data_even,
 
-    output reg [13:0] vram_address_odd,
-    output reg vram_we_odd,
+    output [13:0] vram_address_odd,
+    output vram_we_odd,
     input [15:0] vram_read_data_odd,    
-    output reg [15:0] vram_write_data_odd,
+    output [15:0] vram_write_data_odd,
 
     // Copper RAM interface
 
@@ -147,6 +147,7 @@ module vdp #(
 
         .host_read_en(host_read_en),
         .ready(host_ready),
+        .vram_write_pending(vram_write_pending),
 
         .host_write_en(host_write_en),
         .register_write_en(register_write_en),
@@ -354,12 +355,12 @@ module vdp #(
     // the two kinds of layers can't be active at the same time so reuse these to save LCs
 
     wire [15:0] affine_pretranslate_x = scroll_x[0];
-    wire [15:0] affine_pretranslate_y = scroll_y[0];
+    wire [15:0] affine_pretranslate_y = scroll_y[1];
 
     wire [15:0] affine_a = scroll_x[1];
     wire [15:0] affine_b = scroll_x[2];
     wire [15:0] affine_c = scroll_x[3];
-    wire [15:0] affine_d = scroll_y[1];
+    wire [15:0] affine_d = scroll_y[0];
 
     wire [15:0] affine_translate_x = scroll_y[2];
     wire [15:0] affine_translate_y = scroll_y[3];
@@ -416,13 +417,13 @@ module vdp #(
     // --- Raster offset for scrolling layers ---
 
     localparam SCROLL_START_LEAD_TIME = 32;
-    localparam SCROLL_OFFSCREEN_ADVANCE = -8;
+    localparam SCROLL_OFFSCREEN_ADVANCE = -7;
 
     reg [9:0] raster_x_offset;
 
     localparam HEIGHT_DIFF = HEIGHT_TOTAL - 512;
 
-    wire scroll_base_x_start = raster_x == (OFFSCREEN_X_TOTAL - SCROLL_START_LEAD_TIME + 0);
+    wire scroll_base_x_start = raster_x == (OFFSCREEN_X_TOTAL - SCROLL_START_LEAD_TIME);
 
     // the +1 is to preserve alignment between raster_x[2:0] (used to sequence VRAM access)
     localparam SCROLL_BASE_X_INITIAL = SCROLL_OFFSCREEN_ADVANCE + 1;
@@ -433,27 +434,12 @@ module vdp #(
 
     // --- Raster offset for sprites ---
 
-    localparam SPRITE_X_INITIAL = -2;
-    localparam SPRITE_START_LEAD_TIME = 10;
-    localparam SPRITE_HOLD_TIME = HEIGHT_TOTAL - 512;
-
     reg [9:0] sprites_x;
     reg [8:0] sprites_y;
-
-    reg [3:0] sprites_y_hold_counter;
-    reg sprites_y_held;
-
-    reg [8:0] sprites_y_nx;
-
-    always @* begin
-        sprites_y_nx = sprites_y;
-
-        if (frame_ended) begin
-            sprites_y_nx = 0;
-        end else if (line_ended && !sprites_y_held) begin
-            sprites_y_nx = sprites_y + 1;
-        end
-    end
+    
+    localparam SPRITE_X_INITIAL = -1;
+    localparam SPRITE_START_LEAD_TIME = 10;
+    localparam SPRITE_HOLD_TIME = HEIGHT_TOTAL - 512;
 
     // alternatively instead of comparing all bits in raster_x, just check for all 1-bits
     // since it counts up and resets to 0 predictably
@@ -470,13 +456,18 @@ module vdp #(
         end
 
         sprites_x <= (sprites_x_counting ? sprites_x + 1 : SPRITE_X_INITIAL);
+    end
 
-        sprites_y <= sprites_y_nx;
-        sprites_y_hold_counter <= sprites_y_held ? sprites_y_hold_counter + 1 : 0;
-        sprites_y_held <= sprites_y_held && sprites_y_hold_counter != SPRITE_HOLD_TIME;
+    localparam SPRITE_MAX_HEIGHT = 16;
+    localparam SPRITE_Y_DELAY = 2;
 
-        if (active_frame_ended) begin
-            sprites_y_held <= 1;
+    always @(posedge clk) begin
+        if (line_ended) begin
+            if (raster_y == (HEIGHT_TOTAL - SPRITE_MAX_HEIGHT - SPRITE_Y_DELAY)) begin
+                sprites_y <= 512 - SPRITE_MAX_HEIGHT;
+            end else begin
+                sprites_y <= sprites_y + 1;
+            end
         end
     end
 
@@ -485,7 +476,7 @@ module vdp #(
     // Sprites and scroll layers can optionally have their graphics data flipped horizontally.
     // Since only 1 of these can be read at a time, this reversing logic can be shared between all.
 
-    wire map_pixel_row_needs_x_flip = |(scroll_gen_hflip & scroll_char_load);
+    wire map_pixel_row_needs_x_flip = |(scroll_x_flip & scroll_char_load);
     wire sprite_pixel_row_needs_x_flip = vram_sprite_read_data_needs_x_flip && vram_sprite_read_data_valid;
     wire should_reverse_pixel_row = map_pixel_row_needs_x_flip || sprite_pixel_row_needs_x_flip;
 
@@ -511,30 +502,25 @@ module vdp #(
 
     localparam [1:0] LAYER_LAST = LAYERS_TOTAL - 1;
 
-    wire [31:0] scroll_output_pixel;
-
-    wire [7:0] scroll0_output_pixel = scroll_output_pixel[7:0];
-    wire [7:0] scroll1_output_pixel = scroll_output_pixel[15:8];
-    wire [7:0] scroll2_output_pixel = scroll_output_pixel[23:16];
-    wire [7:0] scroll3_output_pixel = scroll_output_pixel[31:24];
+    wire [7:0] scroll_output_pixel [0:3];
 
     generate
         genvar i;
         for (i = 0; i < LAYERS_TOTAL; i = i + 1) begin : scroll_pixel_gen
             vdp_scroll_pixel_generator #(
                 .STAGE_PIXEL_ROW(i != LAYER_LAST)
-            ) scroll_pixel_generator(
+            ) scroll_pixel_generator (
                 .clk(clk),
 
                 .scroll_x_granular(scroll_x[i][2:0]),
                 .raster_x_granular(raster_x_offset[2:0]),
                 .pixel_row(pixel_row_ordered),
-                .palette_number(scroll_gen_palette[i * 4 + 3: i * 4]),
+                .palette_number(scroll_palette[i]),
                 .meta_load_enable(scroll_meta_load[i]),
                 .tile_row_load_enable(scroll_char_load[i]),
                 .shifter_preload_load_enable(load_all_scroll_row_data),
 
-                .pixel(scroll_output_pixel[i * 8 + 7: i * 8])
+                .pixel(scroll_output_pixel[i])
             );
         end
     endgenerate
@@ -553,15 +539,17 @@ module vdp #(
 
     wire [4:0] layer_mask;
 
-    wire [7:0] selected_layer_pixel = affine_enabled ? affine_output_pixel : scroll0_output_pixel;
+    wire [7:0] selected_layer_pixel = affine_enabled ? affine_output_pixel : scroll_output_pixel[0];
 
     vdp_priority_compute priority_compute(
         .clk(clk),
 
         .scroll0_pixel(selected_layer_pixel),
-        .scroll1_pixel(scroll1_output_pixel),
-        .scroll2_pixel(scroll2_output_pixel),
-        .scroll3_pixel(scroll3_output_pixel),
+        .scroll0_is_8bpp(affine_enabled),
+
+        .scroll1_pixel(scroll_output_pixel[1]),
+        .scroll2_pixel(scroll_output_pixel[2]),
+        .scroll3_pixel(scroll_output_pixel[3]),
 
         .sprite_pixel(sprite_pixel),
         .sprite_priority(sprite_pixel_priority),
@@ -585,14 +573,14 @@ module vdp #(
         vram_read_data_odd_r <= vram_read_data_odd;
     end
 
-    reg [3:0] scroll_meta_load;
-    reg [3:0] scroll_char_load;
+    wire [3:0] scroll_meta_load;
+    wire [3:0] scroll_char_load;
 
-    reg load_all_scroll_row_data;
-    reg vram_written;
+    wire load_all_scroll_row_data;
+    wire vram_written;
 
-    wire [15:0] scroll_gen_palette;
-    wire [3:0] scroll_gen_hflip;
+    wire [3:0] scroll_palette [0:3];
+    wire [3:0] scroll_x_flip;
 
     vdp_vram_bus_arbiter_standard bus_arbiter(
         .clk(clk),
@@ -601,7 +589,7 @@ module vdp #(
         .raster_x(raster_x),
         .raster_y(raster_y),
 
-        // Scroll atrributes
+        // Scroll attributes
 
         .scroll_x_0(scroll_x[0]), .scroll_x_1(scroll_x[1]), .scroll_x_2(scroll_x[2]), .scroll_x_3(scroll_x[3]),
         .scroll_y_0(scroll_y[0]), .scroll_y_1(scroll_y[1]), .scroll_y_2(scroll_y[2]), .scroll_y_3(scroll_y[3]),
@@ -638,11 +626,11 @@ module vdp #(
 
         // Output scroll attributes
 
-        .scroll_palette_0(scroll_gen_palette[3:0]), .scroll_palette_1(scroll_gen_palette[7:4]),
-        .scroll_palette_2(scroll_gen_palette[11:8]), .scroll_palette_3(scroll_gen_palette[15:12]),
+        .scroll_palette_0(scroll_palette[0]), .scroll_palette_1(scroll_palette[1]),
+        .scroll_palette_2(scroll_palette[2]), .scroll_palette_3(scroll_palette[3]),
 
-        .scroll_x_flip_0(scroll_gen_hflip[0]), .scroll_x_flip_1(scroll_gen_hflip[1]),
-        .scroll_x_flip_2(scroll_gen_hflip[2]), .scroll_x_flip_3(scroll_gen_hflip[3]),
+        .scroll_x_flip_0(scroll_x_flip[0]), .scroll_x_flip_1(scroll_x_flip[1]),
+        .scroll_x_flip_2(scroll_x_flip[2]), .scroll_x_flip_3(scroll_x_flip[3]),
 
         // VRAM interface
 
@@ -661,7 +649,7 @@ module vdp #(
 
     wire [13:0] vram_sprite_address;
     wire vram_sprite_read_data_needs_x_flip;
-    reg vram_sprite_read_data_valid;
+    wire vram_sprite_read_data_valid;
 
     wire sprite_core_reset = line_ended;
 
@@ -696,7 +684,7 @@ module vdp #(
     reg [9:0] affine_x;
     wire [8:0] affine_y = raster_y;
 
-    wire affine_x_start = raster_x == (OFFSCREEN_X_TOTAL - 16);
+    wire affine_x_start = raster_x == (OFFSCREEN_X_TOTAL - 17);
     wire affine_x_end = line_ended;
 
     reg affine_offscreen;

@@ -69,7 +69,7 @@ module vdp_sprite_core #(
     // h: height select (8 or 16)
     // w: width select (8 or 16)
     // Y: Y flip - the advantage of doing it here is that it frees up bits in other attribute blocks
-    // -: ?
+    // -: unused
 
     reg [15:0] y_block [0:255];
 
@@ -110,17 +110,10 @@ module vdp_sprite_core #(
 
     // --- x_block ---
 
-    // EaaaaXxx xxxxxxxx
+    // -----Xxx xxxxxxxx
     // x: x position
-    // X: flip, if decided to go here instead of y_block + hit list
-    //  this CAN be moved to yBlock if it's more convenient there - space is available
-    // Eaaaa: enable per sprite alpha? there is space for it (TODO)
-    //  - this would require extra space in line buffer, which there might already be
-    //  - currently 8bit index
-    //  - 2 bit priority
-    //  - + 4bit alpha? TODO
-    //  - + 1bit alpha enable? TODO
-    //  - = 15bits total
+    // X: flip
+    // -: unused
 
     reg [15:0] x_block [0:255];
 
@@ -145,6 +138,7 @@ module vdp_sprite_core #(
     // c: collision Y within sprite (0-15, 16px sprite tall is the max)
     // w: width select (8 or 16)
     // T: terminator bit
+    // -: unused
 
     wire hit_list_select = render_y[0];
 
@@ -159,80 +153,72 @@ module vdp_sprite_core #(
     wire hit_list_write_en;
     wire [15:0] hit_list_data_in;
 
-    wire [31:0] hit_list_read_data;
-    wire [15:0] hit_list_read_data_0 = hit_list_read_data[15:0];
-    wire [15:0] hit_list_read_data_1 = hit_list_read_data[31:16];
+    wire [15:0] hit_list_read_data_0;
+    wire [15:0] hit_list_read_data_1;
 
-    generate
-        genvar i;
-        for (i = 0; i < 2; i = i + 1) begin : hit_list_gen
-            wire write_en = hit_list_write_en & (hit_list_select ^ i);
+    dpram #(
+        .ADDRESS_WIDTH(8),
+        .DATA_WIDTH(16)
+    ) hit_list [1:0] (
+        .clk(clk),
 
-            reg [15:0] ram [0:255];
-            reg [15:0] read_data;
+        .write_en({2{hit_list_write_en}} & {~hit_list_select, hit_list_select}),
+        .write_address(hit_list_write_address),
+        .write_data(hit_list_data_in),
 
-            assign hit_list_read_data[i * 16 + 15: i * 16] = read_data;
-
-            always @(posedge clk) begin
-                if (write_en) begin
-                    ram[hit_list_write_address] <= hit_list_data_in;
-                end
-
-                read_data <= ram[hit_list_read_address];
-            end
-        end
-    endgenerate
+        .read_address(hit_list_read_address),
+        .read_data({hit_list_read_data_1, hit_list_read_data_0})
+    );
 
     // --- Line buffers ---
 
-    // selected buffer toggles every line
+    // Selected buffer toggles every line
     wire line_buffer_select = !render_y[0];
 
-    // there is an offscreen and onscreen buffer at any given time
-    // on: onscreen - being read
-    // off: offscreen - being rendered to
-
     wire [9:0] line_buffer_write_address;
-    wire [11:0] line_buffer_data_in;
+    wire [9:0] line_buffer_write_data;
     wire line_buffer_write_en;
 
     wire [9:0] line_buffer_clear_write_address;
     wire line_buffer_clear_en;
 
-    // --- Line buffers ---
+    wire [19:0] line_buffer_data_out;
+    wire [9:0] line_buffer_data_out_0 = line_buffer_data_out[9:0];
+    wire [9:0] line_buffer_data_out_1 = line_buffer_data_out[19:10];
 
-    wire [23:0] line_buffer_data_out;
-    wire [11:0] line_buffer_data_out_0 = line_buffer_data_out[11:0];
-    wire [11:0] line_buffer_data_out_1 = line_buffer_data_out[23:12];
-
+    genvar i;
     generate
         for (i = 0; i < 2; i = i + 1) begin : line_buffer_gen
             wire select = line_buffer_select ^ i;
 
             wire [9:0] write_address = select ? line_buffer_write_address : line_buffer_clear_write_address;
-            wire [11:0] write_data = select ? line_buffer_data_in : line_buffer_clear_data_in;
+            wire [9:0] write_data = select ? line_buffer_write_data : line_buffer_clear_data_in;
             wire write_en = select ? line_buffer_write_en : line_buffer_clear_en;
 
-            reg [11:0] line_buffer [0:1023];
-            reg [11:0] read_data;
+            wire [9:0] read_data;
+            assign line_buffer_data_out[i * 10+:10] = read_data;
 
-            assign line_buffer_data_out[i * 12 + 11 : i * 12] = read_data;
+            dpram #(
+                .ADDRESS_WIDTH(10),
+                .DATA_WIDTH(10)
+            ) line_buffer (
+                .clk(clk),
 
-            always @(posedge clk) begin
-                if (write_en) begin
-                    line_buffer[write_address] <= write_data;
-                end
+                .write_en(write_en),
+                .write_address(write_address),
+                .write_data(write_data),
 
-                read_data <= line_buffer[line_buffer_display_read_address];
-            end
+                .read_address(line_buffer_display_read_address),
+                .read_data(read_data)
+            );
         end
     endgenerate
     
-    // --- Line buffer clearing ---
+    // Clearing:
 
     reg [9:0] line_buffer_previous_read_address;
     assign line_buffer_clear_write_address = line_buffer_previous_read_address;
-    wire [12:0] line_buffer_clear_data_in = 12'h000;
+    wire [9:0] line_buffer_clear_data_in = 10'b0;
 
     assign line_buffer_clear_en = 1;
 
@@ -240,7 +226,7 @@ module vdp_sprite_core #(
         line_buffer_previous_read_address <= line_buffer_display_read_address;
     end
     
-    // --- Line buffer reading ---
+    // Reading:
 
     wire [9:0] line_buffer_display_read_address;
     wire [9:0] line_buffer_display_data;
@@ -323,7 +309,7 @@ module vdp_sprite_core #(
         .flip_x(x_block_data_out[10]),
 
         .line_buffer_write_address(line_buffer_write_address),
-        .line_buffer_write_data(line_buffer_data_in),
+        .line_buffer_write_data(line_buffer_write_data),
         .line_buffer_write_en(line_buffer_write_en),
         
         .hit_list_read_address(hit_list_blitter_read_address),
@@ -332,15 +318,5 @@ module vdp_sprite_core #(
         .width_select(hit_list_render_read_data[12]),
         .hit_list_ended(hit_list_ended)
     );
-
-`ifdef LOG_SPRITES
-
-    always @(posedge clk) begin
-        if (hit_list_write_en) begin
-            $display("CORE: wrote hitlist ([%h] = %h) @ %0t", hit_list_write_address, hit_list_data_in, $time);
-        end
-    end
-
-`endif
 
 endmodule

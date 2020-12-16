@@ -40,6 +40,19 @@ void VerilatorSimulation::step(uint64_t time) {
     tb->btn_2 = button_2;
     tb->btn_3 = button_3;
 
+    tb->btn_y = button_y;
+    tb->btn_up = button_up;
+    tb->btn_down = button_down;
+
+    tb->btn_l = button_l;
+    tb->btn_r = button_r;
+
+    tb->btn_x = button_x;
+    tb->btn_a = button_a;
+
+    tb->btn_start = button_start;
+    tb->btn_select = button_select;
+
     tb->eval();
 
     auto flash_bb = tb->ics32_tb->flash;
@@ -55,6 +68,21 @@ void VerilatorSimulation::step(uint64_t time) {
 #if VCD_WRITE
     trace_update(time);
 #endif
+}
+
+bool VerilatorSimulation::get_samples(int16_t *left, int16_t *right) {
+    auto dac = tb->ics32_tb->audio;
+    bool has_sample = dac->valid && dac->clk;
+
+    if (has_sample) {
+        assert(left);
+        assert(right);
+
+        *left = dac->in_l;
+        *right = dac->in_r;
+    }
+
+    return has_sample;
 }
 
 #if VCD_WRITE

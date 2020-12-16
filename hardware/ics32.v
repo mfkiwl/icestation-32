@@ -7,13 +7,18 @@
 `default_nettype none
 
 `include "bus_arbiter.vh"
+`include "clocks.vh"
 
 module ics32 #(
+    parameter integer CLK_1X_FREQ = `CLK_1X_WIDESCREEN,
+    parameter integer CLK_2X_FREQ = `CLK_2X_WIDESCREEN,
     parameter [0:0] USE_VEXRISCV = 1,
     parameter [0:0] ENABLE_WIDESCREEN = 1,
     parameter [0:0] ENABLE_FAST_CPU = 0,
     parameter integer RESET_DURATION_EXPONENT = 2,
     parameter [0:0] ENABLE_BOOTLOADER = 1,
+    parameter integer BOOTLOADER_SIZE = 256,
+    parameter ADPCM_STEP_LUT_PATH = "adpcm_step_lut.hex",
 `ifdef BOOTLOADER
     parameter BOOTLOADER_PATH = `BOOTLOADER
 `else
@@ -24,32 +29,38 @@ module ics32 #(
     input clk_2x,
     input pll_locked,
 
+    output reset_1x,
+    output reset_2x,
+
     output [3:0] vga_r,
     output [3:0] vga_g,
     output [3:0] vga_b,
 
     output vga_hsync,
     output vga_vsync,
-
-    output vga_clk,
     output vga_de,
 
     output [7:0] led,
 
-    input btn_u,
-    input btn_1,
-    input btn_2,
-    input btn_3,
+    output pad_latch,
+    output pad_clk,
+    input [1:0] pad_data,
 
     output [1:0] flash_clk_ddr,
     output flash_csn,
     output [3:0] flash_in,
     output [3:0] flash_in_en,
-    input [3:0] flash_out
+    input [3:0] flash_out,
+
+    output [15:0] audio_output_l,
+    output [15:0] audio_output_r,
+    output audio_output_valid
 );
     // --- Bootloader ---
 
-    reg [31:0] bootloader [0:255];
+    localparam BOOTLOADER_ADDRESS_WIDTH = $clog2(BOOTLOADER_SIZE);
+
+    reg [31:0] bootloader [0:BOOTLOADER_SIZE - 1];
 
     reg [31:0] bootloader_read_data;
 
@@ -58,7 +69,7 @@ module ics32 #(
     end
 
     always @(posedge cpu_clk) begin
-        bootloader_read_data <= bootloader[cpu_address_1x[9:2]];
+        bootloader_read_data <= bootloader[cpu_address_1x[BOOTLOADER_ADDRESS_WIDTH + 1:2]];
     end
 
     // --- LEDs ---
@@ -75,13 +86,13 @@ module ics32 #(
         end
     end
 
-    // --- DSP math support --- (TODO extract)
+    // --- DSP math support ---
 
     reg [15:0] dsp_mult_a, dsp_mult_b;
     reg [31:0] dsp_result;
 
-    // the dsp_mult_a/b assignments can't be in nested if statements to infer the MAC16 FFs
-    // otherwise, SB_DFFs are spent on this
+    // The dsp_mult_a/b assignments can't be in nested if statements to infer the MAC16 FFs
+    // Otherwise, SB_DFFs are spent on this
 
     always @(posedge vdp_clk) begin
         if (dsp_write_en && !cpu_address[2]) begin
@@ -98,8 +109,6 @@ module ics32 #(
 
     // --- Reset generator ---
 
-    wire reset_1x, reset_2x;
-
     reset_generator #(
         .DURATION_EXPONENT(RESET_DURATION_EXPONENT)
     ) reset_generator (
@@ -112,8 +121,6 @@ module ics32 #(
     );
 
     // --- Clock Assignment ---
-
-    assign vga_clk = clk_2x;
 
     wire cpu_clk, vdp_clk;
     wire cpu_reset, vdp_reset;
@@ -137,6 +144,7 @@ module ics32 #(
     // --- Address deccoder ---
 
     wire vdp_en, vdp_write_en;
+    wire audio_ctrl_en, audio_ctrl_write_en;
     wire status_en, status_write_en;
     wire flash_read_en;
     wire dsp_en, dsp_write_en;
@@ -155,8 +163,10 @@ module ics32 #(
         .cpu_address(cpu_address),
         .cpu_mem_valid(cpu_mem_valid),
         .cpu_wstrb(cpu_wstrb),
-
         .cpu_wstrb_decoder(cpu_wstrb_decoder),
+
+        .audio_ctrl_en(audio_ctrl_en),
+        .audio_ctrl_write_en(audio_ctrl_write_en),
 
         .vdp_en(vdp_en),
         .vdp_write_en(vdp_write_en),
@@ -175,7 +185,12 @@ module ics32 #(
         .flash_read_en(flash_read_en),
 
         .flash_ctrl_en(flash_ctrl_en),
-        .flash_ctrl_write_en(flash_ctrl_write_en)
+        .flash_ctrl_write_en(flash_ctrl_write_en),
+
+        // Unused (handled by 1x decoder)
+        .cpu_ram_en(),
+        .cpu_ram_write_en(),
+        .bootloader_en()
     );
 
     wire active_display;
@@ -203,11 +218,6 @@ module ics32 #(
 
     // --- CPU 1x memory decoder / arbiter ---
 
-    wire [23:0] cpu_address;
-    wire cpu_mem_valid;
-    wire [3:0] cpu_wstrb;
-    wire [31:0] cpu_write_data;
-
     wire bootloader_en;
     wire cpu_ram_en, cpu_ram_write_en;
 
@@ -222,7 +232,21 @@ module ics32 #(
         .cpu_ram_en(cpu_ram_en),
         .cpu_ram_write_en(cpu_ram_write_en),
 
-        .bootloader_en(bootloader_en)
+        .bootloader_en(bootloader_en),
+
+        // Unused outputs (handled by 2x decoder)
+        .cpu_wstrb_decoder(),
+        .vdp_en(),
+        .audio_ctrl_en(),
+        .audio_ctrl_write_en(),
+        .status_en(),
+        .status_write_en(),
+        .flash_read_en(),
+        .dsp_write_en(),
+        .pad_en(),
+        .pad_write_en(),
+        .cop_ram_write_en(),
+        .flash_ctrl_en()
     );
 
     wire [31:0] cpu_read_data_1x_arbiter;
@@ -234,7 +258,7 @@ module ics32 #(
     ) bus_arbiter_1x (
         .clk(cpu_clk),
 
-        // inputs
+        // Inputs
 
         .cpu_address(cpu_address_1x),
         .cpu_write_data(cpu_write_data_1x),
@@ -249,9 +273,11 @@ module ics32 #(
         .pad_en(0),
         .cop_en(0),
         .flash_ctrl_en(0),
+        .audio_ctrl_en(0),
 
         .flash_read_ready(0),
         .vdp_ready(0),
+        .audio_ready(0),
 
         .bootloader_read_data(bootloader_read_data),
         .cpu_ram_read_data(cpu_ram_read_data),
@@ -260,8 +286,9 @@ module ics32 #(
         .vdp_read_data(0),
         .pad_read_data(0),
         .flash_ctrl_read_data(0),
+        .audio_cpu_read_data(0),
 
-        // outputs
+        // Outputs
 
         .cpu_mem_ready(cpu_mem_ready_1x_arbiter),
         .cpu_read_data(cpu_read_data_1x_arbiter)
@@ -375,7 +402,9 @@ module ics32 #(
 
         .cop_ram_read_en(cop_ram_read_en),
         .cop_ram_read_address(cop_ram_read_address),
-        .cop_ram_read_data(cop_ram_read_data)
+        .cop_ram_read_data(cop_ram_read_data),
+
+        .frame_ended()
     );
 
     vram vram(
@@ -389,6 +418,70 @@ module ics32 #(
 
         .read_data({vram_read_data_odd, vram_read_data_even})
     );
+
+    // --- ADPCM Audio ---
+
+    wire audio_ctrl_ch_write_ready, audio_gb_write_ready;
+    wire audio_ctrl_ready = audio_ctrl_ch_write_ready || audio_gb_write_ready || audio_ctrl_read_ready;
+
+    wire audio_ctrl_read_request = audio_ctrl_en && !audio_ctrl_write_en;
+    wire audio_ctrl_read_ready;
+
+    wire audio_ctrl_ch_write_en = audio_ctrl_write_en && !cpu_address[9];
+    wire audio_ctrl_gb_write_en = audio_ctrl_write_en && cpu_address[9];
+
+    wire [7:0] audio_ctrl_ch_write_address = {cpu_address[8:2], (cpu_wstrb_decoder[2] | cpu_wstrb_decoder[3])};
+
+    wire [1:0] audio_ctrl_write_byte_mask = {
+        cpu_wstrb_decoder[1] | cpu_wstrb_decoder[3],
+        cpu_wstrb_decoder[0] | cpu_wstrb_decoder[2]
+    };
+
+    wire [7:0] audio_ctrl_cpu_read_data;
+
+    wire [22:0] pcm_read_address;
+    wire pcm_read_en;
+    wire pcm_data_ready;
+
+    ics_adpcm #(
+        .OUTPUT_INTERVAL(CLK_2X_FREQ / 44100),
+        .CHANNELS(8),
+        .ADPCM_STEP_LUT_PATH(ADPCM_STEP_LUT_PATH)
+    ) ics_adpcm (
+        .clk(vdp_clk),
+        .reset(vdp_reset),
+
+        .ch_write_address(audio_ctrl_ch_write_address),
+        .ch_write_data(cpu_write_data[15:0]),
+        .ch_write_byte_mask(audio_ctrl_write_byte_mask),
+        .ch_write_en(audio_ctrl_ch_write_en),
+        .ch_write_ready(audio_ctrl_ch_write_ready),
+
+        .gb_write_address(cpu_address[3:2]),
+        .gb_write_data(cpu_write_data[15:0]),
+        .gb_write_en(audio_ctrl_gb_write_en),
+        .gb_write_ready(audio_gb_write_ready),
+
+        .status_read_address(cpu_address[3:2]),
+        .status_read_request(audio_ctrl_read_request),
+        .status_read_ready(audio_ctrl_read_ready),
+        .status_read_data(audio_ctrl_cpu_read_data),
+
+        .pcm_address_valid(pcm_read_en),
+        .pcm_read_address(pcm_read_address),
+        .pcm_data_ready(pcm_data_ready),
+        .pcm_read_data(flash_read_data[15:0]),
+
+        .output_l(audio_output_l),
+        .output_r(audio_output_r),
+        .output_valid(audio_output_valid),
+
+        .gb_write_busy(),
+        .gb_playing(),
+        .gb_ended()
+    );
+
+    /* verilator public_module */
 
     // --- CPU RAM ---
 
@@ -406,15 +499,12 @@ module ics32 #(
         .read_data(cpu_ram_read_data)
     );
 
-    // --- Gamepad reading --- (TODO, 3 buttons on breakout board for now)
+    // --- Gamepad IO ---
 
-    wire [1:0] pad_read_data;
     reg [1:0] pad_ctrl;
 
-    wire pad_latch = pad_ctrl[0];
-    wire pad_clk = pad_ctrl[1];
-
-    reg pad_clk_r;
+    assign pad_latch = pad_ctrl[0];
+    assign pad_clk = pad_ctrl[1];
 
     always @(posedge vdp_clk) begin
         if (pad_write_en) begin
@@ -422,48 +512,22 @@ module ics32 #(
         end
     end
 
-    // --- Gamepad mocking using iCEBreaker buttons (temporary) ---
-
-    reg [15:0] pad_mock_state;
-    assign pad_read_data[0] = pad_mock_state[0];
-    // Instead of P2 data, return the user button state
-    assign pad_read_data[1] = user_button_r;
-
-    always @(posedge vdp_clk) begin
-        if (pad_latch) begin
-            // left, right, B inputs respectively
-            pad_mock_state <= {btn_1, btn_3, 5'b0, btn_2};
-        end
-
-        if (pad_clk && !pad_clk_r) begin
-            pad_mock_state <= {1'b0, pad_mock_state[15:1]};
-        end
-
-        pad_clk_r <= pad_clk;
-    end
-
-    // --- User button ---
-
-    reg user_button_r;
-
-    // Not bothering to debounce this since its uses don't rely on it
-
-    always @(posedge vdp_clk) begin
-        user_button_r <= btn_u;
-    end
-
     // --- Bus arbiter ---
 
+    wire [31:0] cpu_address;
+    wire cpu_mem_valid;
+    wire [3:0] cpu_wstrb;
+    wire [31:0] cpu_write_data;
     wire [31:0] cpu_read_data;
     wire cpu_mem_ready;
 
     bus_arbiter #(
         .SUPPORT_2X_CLK(!ENABLE_FAST_CPU),
-        .READ_SOURCES(`BA_VDP | `BA_FLASH | `BA_DSP | `BA_PAD | `BA_FLASH_CTRL)
+        .READ_SOURCES(`BA_VDP | `BA_FLASH | `BA_DSP | `BA_PAD | `BA_FLASH_CTRL | `BA_AUDIO)
     ) bus_arbiter (
         .clk(vdp_clk),
 
-        // inputs
+        // Inputs
 
         .cpu_address(cpu_address),
         .cpu_write_data(cpu_write_data),
@@ -478,19 +542,22 @@ module ics32 #(
         .pad_en(pad_en),
         .cop_en(cop_ram_write_en),
         .flash_ctrl_en(flash_ctrl_en),
+        .audio_ctrl_en(audio_ctrl_en),
 
         .flash_read_ready(flash_read_ready),
         .vdp_ready(vdp_ready),
+        .audio_ready(audio_ctrl_ready),
 
         .bootloader_read_data(0),
         .cpu_ram_read_data(0),
         .flash_read_data(flash_read_data),
         .dsp_read_data(dsp_result),
         .vdp_read_data(vdp_read_data),
-        .pad_read_data(pad_read_data),
+        .pad_read_data(pad_data),
         .flash_ctrl_read_data(flash_ctrl_read_data),
+        .audio_cpu_read_data(audio_ctrl_cpu_read_data),
 
-        // outputs
+        // Outputs
 
         .cpu_mem_ready(cpu_mem_ready),
         .cpu_read_data(cpu_read_data)
@@ -527,7 +594,8 @@ module ics32 #(
         end else begin
             picorv32 #(
                 .ENABLE_TRACE(0),
-                // register file gets inferred as BRAMs so using rv32e has little practical gain
+
+                // Register file gets inferred as BRAMs so using rv32e has little practical gain
                 .ENABLE_REGS_16_31(1),
 
                 // MMIO DSP is used instead of the included PCPI implementation
@@ -537,17 +605,17 @@ module ics32 #(
                 // SP defined by software
                 // .STACKADDR(32'h0001_0000),
                 
-                // this greatly helps shfit speed but is still an optional extra that could be removed
+                // Greatly helps shift speed but still an optional extra that could be removed
                 .TWO_STAGE_SHIFT(0),
 
-                // huge cell savings with this enabled
+                // Huge savings with this enabled
                 .TWO_CYCLE_ALU(1),
 
-                // moderate savings on these and not really expecting trouble with aligned C-generated code
+                // Moderate savings and not really expecting trouble with aligned C code
                 .CATCH_MISALIGN(0),
                 .CATCH_ILLINSN(0),
 
-                // this seems neutral at best even with retiming?
+                // Neutral at best even with retiming?
                 .TWO_CYCLE_COMPARE(0),
 
                 // rdcycle(h) instructions are not needed
@@ -601,12 +669,21 @@ module ics32 #(
 
         // Reader A: CPU
 
-        .read_address_a({4'b0, cpu_address[18:0]}),
+        .read_address_a({cpu_address[23:2], 2'b00}),
         .read_en_a(flash_read_en),
         .ready_a(flash_read_ready),
 
+        // 32bit reads (full size)
+        .size_a(1),
+
         // Reader B: ADPCM DSP
-        // (WIP)
+
+        .read_address_b({pcm_read_address, 1'b0}),
+        .read_en_b(pcm_read_en),
+        .ready_b(pcm_data_ready),
+        
+        // 16bit reads
+        .size_b(0),
 
         // Flash read data
 
@@ -622,7 +699,7 @@ module ics32 #(
         .flash_out(flash_out)
     );
 
-    // --- Flash CPU control (to extract, possibly with the above two blocks) ---
+    // --- Flash CPU control ---
 
     reg flash_ctrl_active;
 

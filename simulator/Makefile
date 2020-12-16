@@ -1,27 +1,25 @@
-# Ensure bootloader file is up to date
+# Include rules needed to build the boot firmware
 
-BOOT_DIR = ../firmware
-BOOT_HEX = $(BOOT_DIR)/boot.hex
+include ../firmware/boot.mk
 
-.PHONY: dummy
-dummy:
-	@$(MAKE) -C $(BOOT_DIR)
-
--include dummy
+BOOT_HEX_SELECTED := $(BOOT_MULTI_HEX)
 
 ### Common ###
 
-SIM_SRCS = main.cpp Simulation.cpp QSPIFlashSim.cpp
+SIM_SRCS = main.cpp Simulation.cpp QSPIFlashSim.cpp tinywav/tinywav.cpp
 SIM_HEADERS =  Simulation.hpp
 
 HDL_TOP = ics32_tb
 HDL_DIR = ../hardware
 
-VEX_USE_BOOTLOADER = 0
+# This must be set if ics32_tb.ENABLE_BOOTLOADER is also set
+# The Pico has parameters for the reset vector but the Vex doesn't
+# (This should be made a build-time-configurable top level param)
+VEX_USE_BOOTLOADER = 1
 include ../hardware/sources.mk
 
 HDL_SOURCES := $(SOURCES:%.v=$(HDL_DIR)/%.v)
-HDL_SOURCES += $(HDL_TOP).v $(HDL_DIR)/common/spram_256k.v sb_io.v
+HDL_SOURCES += $(HDL_TOP).v $(HDL_DIR)/common/spram_256k.v
 
 CXX_OPT = -O3
 
@@ -35,6 +33,7 @@ CXXRTL_HEADERS = $(CXXRTL_SRCS:%.cpp=%.hpp)
 CXXRTL_INCLUDES := $(shell yosys-config --datdir/include)
 CXXRTL_CFLAGS := \
 	-Wall \
+	-Itinywav/ \
 	$(shell sdl2-config --cflags) \
 	-DSIM_CXXRTL \
 	-DCXXRTL_INCLUDE_CAPI_IMPL
@@ -46,7 +45,7 @@ CXXRTL_HDL_DEFINES = -DSIMULATOR -DEXTERNAL_CLOCKS -DDEBUGNETS -DALPHA_LUT="alph
 
 define write-cxxrtl-sim
 	yosys -p \
-		'verilog_defines -DBOOTLOADER="$(BOOT_HEX)" $(CXXRTL_HDL_DEFINES); \
+		'verilog_defines -DBOOTLOADER="$(BOOT_HEX_SELECTED)" $(CXXRTL_HDL_DEFINES); \
 		read_verilog -I$(HDL_DIR) $(CXXRTL_SIM_MODELS) $(HDL_SOURCES); \
 		hierarchy -check -top $(HDL_TOP); \
 		proc; flatten; clean; splitnets -driver; clean -purge; \
@@ -80,32 +79,35 @@ VLT_FLAGS =	\
 	-cc --language 1364-2005 -v config.vlt -O3 --assert \
 	-Wall -Wno-fatal -Wno-WIDTH -Wno-TIMESCALEMOD \
 	-I$(HDL_DIR) \
-	-DBOOTLOADER=\"$(BOOT_HEX)\" -DEXTERNAL_CLOCKS -DSIMULATOR
+	-DBOOTLOADER=\"$(BOOT_HEX_SELECTED)\" -DEXTERNAL_CLOCKS -DSIMULATOR
 
 VLT_CXX_SOURCES = $(SIM_SRCS) ../VerilatorSimulation.cpp
-VLT_CFLAGS := -std=c++14 $(CXX_OPT) $(shell sdl2-config --cflags) -I../ -DSIM_VERILATOR
+VLT_CFLAGS := -std=c++14 $(CXX_OPT) $(shell sdl2-config --cflags) -I../ -I../tinywav/ -DSIM_VERILATOR
 VLT_LDFLAGS := $(shell sdl2-config --libs)
 
 verilator_sim_trace: VLT_CFLAGS += -DVCD_WRITE=1
 verilator_sim_trace: VLT_FLAGS += --trace
 
-# Verilator already manages dependnecies, generates its own Makefile, forwards your C/LDFLAGS etc.
+# Verilator already manages dependencies, generates its own Makefile, forwards your C/LDFLAGS etc.
 # There is no need to duplicate that effort here, just invokve it everytime and it'll only do
 # work if necessary.
 
 define build-verilator-sim
 	set -e ;\
 	verilator $(VLT_FLAGS) -o $(VLT_SIM_NAME) \
-		--top-module $(HDL_TOP) $(HDL_SOURCES) $(HDL_TOP).v \
+		--top-module $(HDL_TOP) $(HDL_SOURCES) \
 		-CFLAGS "$(VLT_CFLAGS)" -LDFLAGS "$(VLT_LDFLAGS)" --exe $(VLT_CXX_SOURCES) ;\
 	make -C obj_dir/ -f V$(HDL_TOP).mk ;\
 	cp obj_dir/$(VLT_SIM_NAME) $@
 endef
 
-verilator_sim:
+verilator_sim: $(BOOT_HEX_SELECTED)
 	$(build-verilator-sim)
 
-verilator_sim_trace:
+verilator_sim_trace: $(BOOT_HEX_SELECTED)
 	$(build-verilator-sim)
 
 .PHONY: verilator_sim verilator_sim_trace
+
+.DEFAULT_GOAL = verilator_sim
+
